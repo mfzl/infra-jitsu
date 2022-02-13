@@ -1,0 +1,3 @@
+name: infra-jitsu
+runtime: nodejs
+description: Jitsu PoC infrastructure on k8s
