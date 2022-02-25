@@ -4,6 +4,7 @@ import * as aws from "@pulumi/aws";
 import * as awsx from "@pulumi/awsx";
 import * as pulumi from "@pulumi/pulumi";
 import * as docker from "@pulumi/docker";
+import JitsuServerScaler from "./server-hpa";
 
 
 const config = new pulumi.Config()
@@ -112,6 +113,19 @@ const configuratorDNSRecord = new aws.route53.Record("jitsu-configurator-dns-rec
   zoneId: devZone.then((z) => z.zoneId)
 })
 
+const jitsuServerDNSRecord = new aws.route53.Record("jitsu-server-dns-record", {
+  name: "publish-events",
+  type: aws.route53.RecordTypes.A,
+  aliases: [
+    {
+      name: alb.then(l => l.dnsName),
+      zoneId: alb.then(l => l.zoneId),
+      evaluateTargetHealth: true,
+    }
+  ],
+  zoneId: devZone.then((z) => z.zoneId)
+})
+
 const configuratorFrontendImageECR = new aws.ecr.Repository("jitsu-configurator-frontend-ecr", {})
 
 // Get registry info (creds and endpoint).
@@ -161,21 +175,6 @@ const configuratorSvc =  new k8s.core.v1.Service("jitsu-configurator", {
   }
 })
 
-const jitsuServerSvc = new k8s.core.v1.Service("jitsu-server", {
-  metadata: {
-    namespace: jitsuNS.metadata.name,
-  },
-  spec: {
-    selector: jitsuServerLabels,
-    ports: [{
-      name: "jitsu-server",
-      port: 80,
-      targetPort: "server"
-    }],
-    type: "ClusterIP"
-  }
-})
-
 const configuratorIngress = new k8s.networking.v1.Ingress("jitsu-configurator-ingress", {
   metadata: {
     name: "jitsu-configurator",
@@ -218,6 +217,63 @@ const configuratorIngress = new k8s.networking.v1.Ingress("jitsu-configurator-in
   }
 })
 
+
+const jitsuServerSvc = new k8s.core.v1.Service("jitsu-server", {
+  metadata: {
+    namespace: jitsuNS.metadata.name,
+  },
+  spec: {
+    selector: jitsuServerLabels,
+    ports: [{
+      name: "jitsu-server",
+      port: 80,
+      targetPort: "server"
+    }],
+    type: "ClusterIP"
+  }
+})
+
+const jitsuServerIngress = new k8s.networking.v1.Ingress("jitsu-server-ingress", {
+  metadata: {
+    name: "jitsu-server",
+    namespace: jitsuNS.metadata.name,
+    annotations: {
+      "kubernetes.io/ingress.class": "nginx",
+    },
+  },
+  spec: {
+
+    rules: [
+      {
+        host: jitsuServerDNSRecord.fqdn,
+        http: {
+          paths: [
+            {
+              backend: {
+                service: {
+                  name: jitsuServerSvc.metadata.name,
+                  port: {
+                    name: "jitsu-server"
+                  }
+                }
+              },
+              path: "/",
+              pathType: "Prefix"
+            }
+          ]
+        }
+      }
+    ],
+    tls: [
+      {
+        hosts: [
+          jitsuServerDNSRecord.fqdn
+        ],
+        secretName: "letsencrypt-lottie-dev"
+      }
+    ]
+  }
+})
 
 
 const firebaseCredentialsSecret = new k8s.core.v1.Secret("firebase-credentials", {
@@ -328,7 +384,7 @@ new k8s.apps.v1.Deployment("jitsu-configurator", {
 
 // Jitsu server configuration document lives here:
 // https://jitsu.com/docs/deployment/deploy-with-docker/jitsu-server
-new k8s.apps.v1.Deployment("jitsu-server", {
+const jitsuDeployment = new k8s.apps.v1.Deployment("jitsu-server", {
   metadata: {
     namespace: jitsuNS.metadata.name,
   },
@@ -364,6 +420,16 @@ new k8s.apps.v1.Deployment("jitsu-server", {
   }
 })
 
+// Not supported in current version
+//
+// new JitsuServerScaler("jitsu-pod-scaler", {
+//   target: {
+//     name: jitsuDeployment.metadata.name,
+//     kind: "Deployment",
+//   }
+// })
+
 export const namespace = jitsuNS.metadata.name;
 export const redisEndpoint = pulumi.interpolate`${redisInstance.cacheNodes[0].address}`;
 export const configuratorURL = pulumi.interpolate`https://${configuratorDNSRecord.fqdn}`;
+export const serverURL = pulumi.interpolate`https://${jitsuServerDNSRecord.fqdn}`;
